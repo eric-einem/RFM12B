@@ -1,11 +1,25 @@
 // RFM12B driver definitions
 // http://opensource.org/licenses/mit-license.php
-// 2012-12-12 (C) felix@lowpowerlab.com
-// Based on the RFM12 driver from jeelabs.com (2009-02-09 <jc@wippler.nl>)
+
+// 2014-01-15  Eric Einem 
+// Re-written to use Arduino library calls (no AVR code), so that it can be
+// compiled for ChipKit wf32 or Uno32 boards.
+
+// Based on the version from LowPowerLab.com, 2012-12-12 (C) felix@lowpowerlab.com
+
+// This version also runs on the Arduino UNO and should run on other
+// AVR based Arudino boards, but will run slower than the version
+// available from LowPowerLab.com.
+
+// The Encryption is not working in this version, at least not on
+// the ChipKit boards.
+
+
 
 #include "RFM12B.h"
+#include <SPI.h>
 
-uint8_t RFM12B::cs_pin;                // CS pin for SPI
+uint8_t RFM12B::spi_cs;					// CS pin for use with digitalWrite() and pinMode()
 uint8_t RFM12B::nodeID;                // address of this node
 uint8_t RFM12B::networkID;             // network group ID
 long RFM12B::rf12_seq;
@@ -15,79 +29,48 @@ volatile uint8_t RFM12B::rxfill;       // number of data bytes in rf12_buf
 volatile int8_t RFM12B::rxstate;       // current transceiver state
 volatile uint16_t RFM12B::rf12_crc;    // running crc value
 volatile uint8_t rf12_buf[RF_MAX];     // recv/xmit buf, including hdr & crc bytes
+uint16_t crc16update(uint16_t crc, uint8_t a);
 
 // function to set chip select
 void RFM12B::SetCS(uint8_t arduinoPin)
 {
-  if (arduinoPin==10) cs_pin = 2;
-  if (arduinoPin== 9) cs_pin = 1;
-  if (arduinoPin== 8) cs_pin = 0;
+	spi_cs = arduinoPin;
 }
 
 void RFM12B::SPIInit() {
-  bitSet(SS_PORT, cs_pin);
-  bitSet(SS_DDR, cs_pin);
-  digitalWrite(SPI_SS, 1);
-  pinMode(SPI_SS, OUTPUT);
+	crypter = 0;
+  digitalWrite(SS,HIGH); //disable device
+  pinMode(SS,OUTPUT);
+  digitalWrite(SPI_SS, HIGH); //physical SS pin high before setting SPCR  
+  pinMode(SPI_SS,OUTPUT);
+  digitalWrite(spi_cs, HIGH);
+  pinMode(spi_cs, OUTPUT);
   pinMode(SPI_MOSI, OUTPUT);
   pinMode(SPI_MISO, INPUT);
   pinMode(SPI_SCK, OUTPUT);
-#ifdef SPCR    
-  SPCR = _BV(SPE) | _BV(MSTR);
-#if F_CPU > 10000000
-  // use clk/2 (2x 1/4th) for sending (and clk/8 for recv, see XFERSlow)
-  SPSR |= _BV(SPI2X);
-#endif
-#else
-  // ATtiny
-  USICR = bit(USIWM0);
-#endif    
+  SPI.begin();
+  SPI.setClockDivider( SPI_CLOCK_DIV4);
   pinMode(RFM_IRQ, INPUT);
-  digitalWrite(RFM_IRQ, 1); // pull-up
+  digitalWrite(RFM_IRQ, HIGH); // pull-up
 }
 
-uint8_t RFM12B::Byte(uint8_t out) {
-#ifdef SPDR
-  SPDR = out;
-  // this loop spins 4 usec with a 2 MHz SPI clock
-  while (!(SPSR & _BV(SPIF)));
-  return SPDR;
-#else
-  // ATtiny
-  USIDR = out;
-  byte v1 = bit(USIWM0) | bit(USITC);
-  byte v2 = bit(USIWM0) | bit(USITC) | bit(USICLK);
-#if F_CPU <= 5000000
-  // only unroll if resulting clock stays under 2.5 MHz
-  USICR = v1; USICR = v2;
-  USICR = v1; USICR = v2;
-  USICR = v1; USICR = v2;
-  USICR = v1; USICR = v2;
-  USICR = v1; USICR = v2;
-  USICR = v1; USICR = v2;
-  USICR = v1; USICR = v2;
-  USICR = v1; USICR = v2;
-#else
-  for (uint8_t i = 0; i < 8; ++i) {
-    USICR = v1;
-    USICR = v2;
-  }
-#endif
-  return USIDR;
-#endif
+uint8_t RFM12B::Byte(uint8_t out) 
+{
+	return SPI.transfer(out);
 }
 
-uint16_t RFM12B::XFERSlow(uint16_t cmd) {
+uint16_t RFM12B::XFERSlow(uint16_t cmd) 
+{
   // slow down to under 2.5 MHz
 #if F_CPU > 10000000
-  bitSet(SPCR, SPR0);
+	SPI.setClockDivider(SPI_CLOCK_DIV8); // bitSet(SPCR, SPR0);
 #endif
-  bitClear(SS_PORT, cs_pin);
+  digitalWrite( spi_cs, LOW );
   uint16_t reply = Byte(cmd >> 8) << 8;
   reply |= Byte(cmd);
-  bitSet(SS_PORT, cs_pin);
+ digitalWrite( spi_cs, HIGH );
 #if F_CPU > 10000000
-  bitClear(SPCR, SPR0);
+	SPI.setClockDivider(SPI_CLOCK_DIV4); //  bitClear(SPCR, SPR0);
 #endif
   return reply;
 }
@@ -95,10 +78,12 @@ uint16_t RFM12B::XFERSlow(uint16_t cmd) {
 void RFM12B::XFER(uint16_t cmd) {
 #if OPTIMIZE_SPI
   // writing can take place at full speed, even 8 MHz works
-  bitClear(SS_PORT, cs_pin);
-  Byte(cmd >> 8) << 8;
+  // bitClear(SS_PORT, cs_pin);  replaced with digitalWrite()
+  digitalWrite( spi_cs, LOW );
+  Byte(cmd >> 8);
   Byte(cmd);
-  bitSet(SS_PORT, cs_pin);
+  // bitSet(SS_PORT, cs_pin);  replaced with digitalWrite()
+  digitalWrite( spi_cs, HIGH );
 #else
   XFERSlow(cmd);
 #endif
@@ -108,24 +93,29 @@ void RFM12B::XFER(uint16_t cmd) {
 // - node ID (0-31)
 // - frequency band (RF12_433MHZ, RF12_868MHZ, RF12_915MHZ)
 // - networkid [optional - default = 170] (0-255 for RF12B, only 212 allowed for RF12)
+// - SPI CS Pin [optional] - chip select pin for the SPI port.
 // - txPower [optional - default = 0 (max)] (7 is min value)
 // - AirKbps [optional - default = 38.31Kbps]
 // - lowVoltageThreshold [optional - default = RF12_2v75]
-void RFM12B::Initialize(uint8_t ID, uint8_t freqBand, uint8_t networkid, uint8_t txPower, uint8_t airKbps, uint8_t lowVoltageThreshold)
+void RFM12B::Initialize(uint8_t ID, uint8_t freqBand, uint8_t networkid, uint8_t spi_cs_pin, uint8_t txPower, uint8_t airKbps, uint8_t lowVoltageThreshold)
 {
-  //while(millis()<60);
-  cs_pin = SS_BIT;
+  spi_cs = spi_cs_pin;
   nodeID = ID;
   networkID = networkid;
   SPIInit();
   XFER(0x0000); // intitial SPI transfer added to avoid power-up problem
   XFER(RF_SLEEP_MODE); // DC (disable clk pin), enable lbd
-  
   // wait until RFM12B is out of power-up reset, this takes several *seconds*
   XFER(RF_TXREG_WRITE); // in case we're still in OOK mode
-  while (digitalRead(RFM_IRQ) == 0)
-    XFER(0x0000);
-      
+  int i;
+  for(i=0; i<5000 && (digitalRead(RFM_IRQ) == 0); i++ );
+  if( i==5000 )
+  {
+	  Serial.println( "Failed to initialize RFM12B" );
+	  return;
+  }
+  for(int i=0; i<10000; i++ ) XFER(0x0000);
+
   XFER(0x80C7 | (freqBand << 4)); // EL (ena TX), EF (ena RX FIFO), 12.0pF 
   XFER(0xA640); // Frequency is exactly 434/868/915MHz (whatever freqBand is)
   XFER(0xC600 + airKbps);   //Air transmission baud rate: 0x08= ~38.31Kbps
@@ -146,119 +136,76 @@ void RFM12B::Initialize(uint8_t ID, uint8_t freqBand, uint8_t networkid, uint8_t
   XFER(0xC043); // Clock output (1.66MHz), Low Voltage threshold (2.55V)
 
   rxstate = TXIDLE;
-#if PINCHG_IRQ
-  #if RFM_IRQ < 8
-    if (nodeID != 0) {
-      bitClear(DDRD, RFM_IRQ);      // input
-      bitSet(PORTD, RFM_IRQ);       // pull-up
-      bitSet(PCMSK2, RFM_IRQ);      // pin-change
-      bitSet(PCICR, PCIE2);         // enable
-    } else
-      bitClear(PCMSK2, RFM_IRQ);
-  #elif RFM_IRQ < 14
-    if (nodeID != 0) {
-      bitClear(DDRB, RFM_IRQ - 8);  // input
-      bitSet(PORTB, RFM_IRQ - 8);   // pull-up
-      bitSet(PCMSK0, RFM_IRQ - 8);  // pin-change
-      bitSet(PCICR, PCIE0);         // enable
-    } else
-      bitClear(PCMSK0, RFM_IRQ - 8);
-  #else
-    if (nodeID != 0) {
-      bitClear(DDRC, RFM_IRQ - 14); // input
-      bitSet(PORTC, RFM_IRQ - 14);  // pull-up
-      bitSet(PCMSK1, RFM_IRQ - 14); // pin-change
-      bitSet(PCICR, PCIE1);         // enable
-    } else
-      bitClear(PCMSK1, RFM_IRQ - 14);
-  #endif
-#else
   if (nodeID != 0)
-    attachInterrupt(0, RFM12B::InterruptHandler, LOW);
+  {
+    attachInterrupt(0, RFM12B::InterruptHandler, FALLING );
+  }
   else
     detachInterrupt(0);
-#endif
+//#endif
 }
 
 // access to the RFM12B internal registers with interrupts disabled
 uint16_t RFM12B::Control(uint16_t cmd) {
-#ifdef EIMSK
-  bitClear(EIMSK, INT0);
+	noInterrupts();
   uint16_t r = XFERSlow(cmd);
-  bitSet(EIMSK, INT0);
-#else
-  // ATtiny
-  bitClear(GIMSK, INT0);
-  uint16_t r = XFERSlow(cmd);
-  bitSet(GIMSK, INT0);
-#endif
+  interrupts();
     return r;
 }
 
 void RFM12B::InterruptHandler() {
-  // a transfer of 2x 16 bits @ 2 MHz over SPI takes 2x 8 us inside this ISR
-  // correction: now takes 2 + 8 µs, since sending can be done at 8 MHz
-  XFER(0x0000);
+
+	// The PIC32 only supports RISING, FALLING or CHANGE interrupts
+	// As a work around, this handler is modified to continue in a loop until
+	// the interrupt pin goes high.
+
+	do
+	{
+	  // a transfer of 2x 16 bits @ 2 MHz over SPI takes 2x 8 us inside this ISR
+	  // correction: now takes 2 + 8 µs, since sending can be done at 8 MHz
+	  XFER(0x0000);
   
-  if (rxstate == TXRECV) {
-    uint8_t in = XFERSlow(RF_RX_FIFO_READ);
+	  if (rxstate == TXRECV) {
+		uint8_t in = XFERSlow(RF_RX_FIFO_READ);
 
-    if (rxfill == 0 && networkID != 0)
-      rf12_buf[rxfill++] = networkID;
+		if (rxfill == 0 && networkID != 0)
+		  rf12_buf[rxfill++] = networkID;
 
-    //Serial.print(out, HEX); Serial.print(' ');
-    rf12_buf[rxfill++] = in;
-    rf12_crc = _crc16_update(rf12_crc, in);
+		//Serial.print(out, HEX); Serial.print(' ');
+		rf12_buf[rxfill++] = in;
+		rf12_crc = crc16update(rf12_crc, in);
 
-    if (rxfill >= rf12_len + 6 || rxfill >= RF_MAX)
-      XFER(RF_IDLE_MODE);
-  } else {
-    uint8_t out;
+		if (rxfill >= rf12_len + 6 || rxfill >= RF_MAX)
+		  XFER(RF_IDLE_MODE);
+	  } else {
+		uint8_t out;
 
-      if (rxstate < 0) {
-        uint8_t pos = 4 + rf12_len + rxstate++;
-        out = rf12_buf[pos];
-        rf12_crc = _crc16_update(rf12_crc, out);
-      } else
-        switch (rxstate++) {
-          case TXSYN1: out = 0x2D; break;
-          case TXSYN2: out = networkID; rxstate = -(3 + rf12_len); break;
-          case TXCRC1: out = rf12_crc; break;
-          case TXCRC2: out = rf12_crc >> 8; break;
-          case TXDONE: XFER(RF_IDLE_MODE); // fall through
-          default:     out = 0xAA;
-        }
+		  if (rxstate < 0) {
+			uint8_t pos = 4 + rf12_len + rxstate++;
+			out = rf12_buf[pos];
+			rf12_crc = crc16update(rf12_crc, out);
+		  } else
+			switch (rxstate++) {
+			  case TXSYN1: out = 0x2D; break;
+			  case TXSYN2: out = networkID; rxstate = -(3 + rf12_len); break;
+			  case TXCRC1: out = rf12_crc; break;
+			  case TXCRC2: out = rf12_crc >> 8; break;
+			  case TXDONE: XFER(RF_IDLE_MODE); // fall through
+			  default:     out = 0xAA;
+			}
         
-    //Serial.print(out, HEX); Serial.print(' ');
-    XFER(RF_TXREG_WRITE + out);
-  }
+		//Serial.print(out, HEX); Serial.print(' ');
+		XFER(RF_TXREG_WRITE + out);
+	  }
+	} 	while( digitalRead(RFM_IRQ) == 0 );
 }
 
-
-#if PINCHG_IRQ
-  #if RFM_IRQ < 8
-    ISR(PCINT2_vect) {
-      while (!bitRead(PIND, RFM_IRQ))
-        RFM12B::InterruptHandler();
-    }
-  #elif RFM_IRQ < 14
-    ISR(PCINT0_vect) {
-      while (!bitRead(PINB, RFM_IRQ - 8))
-        RFM12B::InterruptHandler();
-    }
-  #else
-    ISR(PCINT1_vect) {
-      while (!bitRead(PINC, RFM_IRQ - 14))
-        RFM12B::InterruptHandler();
-    }
-  #endif
-#endif
 
 void RFM12B::ReceiveStart() {
   rxfill = rf12_len = 0;
   rf12_crc = ~0;
   if (networkID != 0)
-    rf12_crc = _crc16_update(~0, networkID);
+    rf12_crc = crc16update(~0, networkID);
   rxstate = TXRECV;
   XFER(RF_RECEIVER_ON);
 }
@@ -285,10 +232,7 @@ bool RFM12B::CanSend() {
   // no need to test with interrupts disabled: state TXRECV is only reached
   // outside of ISR and we don't care if rxfill jumps from 0 to 1 here
   if (rxstate == TXRECV && rxfill == 0 && (Byte(0x00) & (RF_RSSI_BIT >> 8)) == 0) {
-    XFER(RF_IDLE_MODE); // stop receiver
-    //XXX just in case, don't know whether these RF12 reads are needed!
-    // rf12_XFER(0x0000); // status register
-    // rf12_XFER(RF_RX_FIFO_READ); // fifo read
+   XFER(RF_IDLE_MODE); // stop receiver
     rxstate = TXIDLE;
     return true;
   }
@@ -296,11 +240,12 @@ bool RFM12B::CanSend() {
 }
 
 void RFM12B::SendStart(uint8_t toNodeID, bool requestACK, bool sendACK) {
-  rf12_hdr1 = toNodeID | (sendACK ? RF12_HDR_ACKCTLMASK : 0);
+	rf12_hdr1 = toNodeID | (sendACK ? RF12_HDR_ACKCTLMASK : 0);
   rf12_hdr2 = nodeID | (requestACK ? RF12_HDR_ACKCTLMASK : 0);
-  if (crypter != 0) crypter(true);
+  if (crypter != 0)
+	  crypter(true);
   rf12_crc = ~0;
-  rf12_crc = _crc16_update(rf12_crc, networkID);
+  rf12_crc = crc16update(rf12_crc, networkID);
   rxstate = TXPRE1;
   XFER(RF_XMITTER_ON); // bytes will be fed via interrupts
 }
@@ -320,13 +265,20 @@ void RFM12B::SendACK(const void* sendBuf, uint8_t sendLen, uint8_t waitMode) {
 
 void RFM12B::Send(uint8_t toNodeID, const void* sendBuf, uint8_t sendLen, bool requestACK, uint8_t waitMode)
 {
-  while (!CanSend()) ReceiveComplete();
+  while(!CanSend())
+	  ReceiveComplete();
   SendStart(toNodeID, sendBuf, sendLen, requestACK, false, waitMode);
 }
 
 void RFM12B::SendWait(uint8_t waitMode) {
   // wait for packet to actually finish sending
   // go into low power mode, as interrupts are going to come in very soon
+	
+#if defined(_BOARD_WF32_)
+
+  while(rxstate != TXIDLE)
+	  ;
+#else
   while (rxstate != TXIDLE)
     if (waitMode) {
       // power down mode is only possible if the fuses are set to start
@@ -339,6 +291,7 @@ void RFM12B::SendWait(uint8_t waitMode) {
                      SLEEP_MODE_IDLE);
       sleep_mode();
     }
+#endif
 }
 
 void RFM12B::OnOff(uint8_t value) {
@@ -389,7 +342,6 @@ bool RFM12B::ACKReceived(uint8_t fromNodeID) {
 void RFM12B::CryptFunction(bool sending) {
   uint32_t y, z, sum, *v = (uint32_t*) rf12_data;
   uint8_t p, e, rounds = 6;
-  
   if (sending) {
     // pad with 1..4-byte sequence number
     *(uint32_t*)(rf12_data + rf12_len) = ++seqNum;
@@ -443,4 +395,22 @@ void RFM12B::Encrypt(const uint8_t* key, uint8_t keyLen) {
       ((uint8_t*) cryptKey)[i] = key[i];
     crypter = CryptFunction;
   } else crypter = 0;
+}
+
+
+uint16_t
+crc16update(uint16_t crc, uint8_t a)
+{
+	int i;
+
+	crc ^= a;
+	for (i = 0; i < 8; ++i)
+	{
+		if (crc & 1)
+		crc = (crc >> 1) ^ 0xA001;
+		else
+		crc = (crc >> 1);
+	}
+
+	return crc;
 }

@@ -1,16 +1,14 @@
 // RFM12B driver definitions
 // http://opensource.org/licenses/mit-license.php
-// 2012-12-12 (C) felix@lowpowerlab.com
-// Based on the RFM12 driver from jeelabs.com (2009-02-09 <jc@wippler.nl>)
+// 2014-01-15  Eric Einem 
+// Re-written to use Arduino library calls (no AVR code), so that it can be
+// compiled for ChipKit wf32 or Uno32 boards.
+
+// Based on the version from LowPowerLab.com, 2012-12-12 (C) felix@lowpowerlab.com
 
 #ifndef RFM12B_h
 #define RFM12B_h
 
-#include <inttypes.h>
-#include <avr/io.h>
-#include <util/crc16.h>
-#include <avr/eeprom.h>
-#include <avr/sleep.h>
 #if ARDUINO >= 100
   #include <Arduino.h> // Arduino 1.0
 #else
@@ -19,7 +17,7 @@
 
 
 ///RF12 Driver version
-#define OPTIMIZE_SPI       1  // uncomment this to write to the RFM12B @ 8 Mhz
+//#define OPTIMIZE_SPI       1  // uncomment this to write to the RFM12B @ 8 Mhz
 
 /// RF12 CTL bit mask.
 //#define RF12_HDR_CTL    0x80
@@ -89,50 +87,44 @@
 //    select pin for the RFM12B (you're free to set them to anything you like)
 //  - please leave SPI_SS, SPI_MOSI, SPI_MISO, and SPI_SCK as is, i.e. pointing
 //    to the hardware-supported SPI pins on the ATmega, *including* SPI_SS !
-#if defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1280__)
+#if defined(_BOARD_WF32_)
+
+  #define RFM_IRQ     3		// ChipKit WF32  (Todo: check for type of board, and set appropriately)
+  #define SPI_SS      10    // PB2, pin 16	Default Slave Select pin.  Do not change, use Initialize function to set SS pin
+  #define SPI_MOSI    11    // PB3, pin 17
+  #define SPI_MISO    12    // PB4, pin 18
+  #define SPI_SCK     13    // PB5, pin 19
+#define SLEEP_MODE_STANDBY	0
+#define SLEEP_MODE_IDLE 0
+
+#elif defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1280__)
   #define RFM_IRQ     2
-  #define SS_DDR      DDRB
-  #define SS_PORT     PORTB
-  #define SS_BIT      0
   #define SPI_SS      53    // PB0, pin 19
   #define SPI_MOSI    51    // PB2, pin 21
   #define SPI_MISO    50    // PB3, pin 22
   #define SPI_SCK     52    // PB1, pin 20
 #elif defined(__AVR_ATmega644P__) || defined(__AVR_ATmega1284P__)
   #define RFM_IRQ     10
-  #define SS_DDR      DDRB
-  #define SS_PORT     PORTB
-  #define SS_BIT      4
   #define SPI_SS      4
   #define SPI_MOSI    5
   #define SPI_MISO    6
   #define SPI_SCK     7
 #elif defined(__AVR_ATtiny84__) || defined(__AVR_ATtiny44__)
   #define RFM_IRQ     2
-  #define SS_DDR      DDRB
-  #define SS_PORT     PORTB
-  #define SS_BIT      1
   #define SPI_SS      1     // PB1, pin 3
   #define SPI_MISO    4     // PA6, pin 7
   #define SPI_MOSI    5     // PA5, pin 8
   #define SPI_SCK     6     // PA4, pin 9
 #elif defined(__AVR_ATmega32U4__) //Arduino Leonardo, MoteinoLeo
   #define RFM_IRQ     0	    // PD0, INT0, Digital3 
-  #define SS_DDR      DDRB
-  #define SS_PORT     PORTB
-  //OLD from Jeelib: #define SS_BIT      6	    // Dig10, PB6
-  #define SS_BIT      0	    // Dig17, PB0
   #define SPI_SS      17    // PB0, pin 8, Digital17
   #define SPI_MISO    14    // PB3, pin 11, Digital14
   #define SPI_MOSI    16    // PB2, pin 10, Digital16
   #define SPI_SCK     15    // PB1, pin 9, Digital15
 #else
   // ATmega168, ATmega328, etc.
-  #define RFM_IRQ     2
-  #define SS_DDR      DDRB
-  #define SS_PORT     PORTB
-  #define SS_BIT      2     // for PORTB: 2 = d.10, 1 = d.9, 0 = d.8
-  #define SPI_SS      10    // PB2, pin 16
+  #define RFM_IRQ     2	
+  #define SPI_SS      10    // PB2, pin 16	Default Slave Select pin.  Do not change, use Initialize function to set SS pin
   #define SPI_MOSI    11    // PB3, pin 17
   #define SPI_MISO    12    // PB4, pin 18
   #define SPI_SCK     13    // PB5, pin 19
@@ -182,6 +174,7 @@ class RFM12B
 
     static uint8_t networkID;         // network group
     static uint8_t nodeID;            // address of this node
+	static uint8_t spi_cs;
     static const byte DATAMAXLEN;
     volatile uint8_t* Data;
     volatile uint8_t* DataLen;
@@ -189,7 +182,7 @@ class RFM12B
     static void InterruptHandler();
     
     //Defaults: Group: 0xAA=170, transmit power: 0(max), KBPS: 38.3Kbps (air transmission baud - has to be same on all radios in same group)
-  	void Initialize(uint8_t nodeid, uint8_t freqBand, uint8_t groupid=0xAA, uint8_t txPower=0, uint8_t airKbps=0x08, uint8_t lowVoltageThreshold=RF12_2v75);
+  	void Initialize(uint8_t nodeid, uint8_t freqBand, uint8_t groupid=0xAA, uint8_t spi_cs_pin = SPI_SS, uint8_t txPower=0, uint8_t airKbps=0x08, uint8_t lowVoltageThreshold=RF12_2v75);
     void SetCS(uint8_t pin);
     void ReceiveStart();
     bool ReceiveComplete();
